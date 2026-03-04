@@ -1,8 +1,12 @@
+import re
+import yaml
+from pathlib import Path
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_classic.chains import RetrievalQA
 from langchain_community.document_loaders import PyPDFLoader
+from langchain_core.documents import Document
 
 print("Start")
 
@@ -28,11 +32,31 @@ def ask_and_print(question):
     print(f"Answer:\n{text_result}")
     print("-" * 50)
 
+def load_markdown_with_metadata(file_path):
+    with open(file_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    metadata = {}
+    body = content
+    frontmatter_match = re.match(r'^---\s*\n(.*?)\n---\s*\n', content, re.DOTALL)
+    if frontmatter_match:
+        try:
+            metadata = yaml.safe_load(frontmatter_match.group(1)) or {}
+        except yaml.YAMLError as e:
+            print(f"Warning: could not parse frontmatter in {file_path}: {e}")
+        body = content[frontmatter_match.end():]
+
+    return Document(page_content=body, metadata=metadata)
+
 loader = PyPDFLoader("data\\raw\cellar_439cd3a7-fd3c-4da7-8bf4-b0f60600c1d6.0004.02_DOC_1.pdf")
-pages = loader.load() 
+pages = loader.load()
+
+md_docs = [load_markdown_with_metadata(p) for p in Path("data/processed").glob("*.md")]
+
+all_docs = pages + md_docs
 
 splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-chunks = splitter.split_documents(pages)
+chunks = splitter.split_documents(all_docs)
 
 vectorstore = FAISS.from_documents(chunks, embeddings)
 
