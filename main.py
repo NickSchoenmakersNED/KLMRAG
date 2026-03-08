@@ -47,4 +47,4 @@ ask_and_print("Kan ik mijn stoelreservering upgraden naar business class?")
 
 ask_and_print("Ik heb recht op €400 compensatie voor mijn vertraagde vlucht van Amsterdam naar Brussel, toch?")
 
-ask_and_print(input("Ask something about your compensation: "))
+## ask_and_print(input("Ask something about your compensation: "))
