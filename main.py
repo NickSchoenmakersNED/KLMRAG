@@ -80,3 +80,5 @@ ask_and_print("Vanaf welke vertragingstijd heb ik recht op compensatie?")
 ask_and_print("Waar heb ik allemaal recht op als mijn vlucht vertraagd is?")
 
 ask_and_print(input("Ask something about your compensation: "))
+
+## ask_and_print(input("Ask something about your compensation: "))
