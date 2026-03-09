@@ -71,4 +71,12 @@ ask_and_print("Kan ik mijn stoelreservering upgraden naar business class?")
 
 ask_and_print("Ik heb recht op €400 compensatie voor mijn vertraagde vlucht van Amsterdam naar Brussel, toch?")
 
+ask_and_print("Ik heb een vlucht van Brussel naar Amsterdam, maar mijn vlucht heeft 3 uur vertraging. Heb ik recht op compensatie?")
+
+ask_and_print("Mijn vlucht heeft vertraging. Wat zijn mijn opties?")
+
+ask_and_print("Vanaf welke vertragingstijd heb ik recht op compensatie?")
+
+ask_and_print("Waar heb ik allemaal recht op als mijn vlucht vertraagd is?")
+
 ask_and_print(input("Ask something about your compensation: "))
