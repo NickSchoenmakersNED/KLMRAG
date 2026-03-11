@@ -9,6 +9,7 @@ from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableParallel
+from typing import List, Union
 
 print("Start")
 
@@ -66,7 +67,19 @@ llm = ChatOpenAI(
     base_url="http://localhost:1234/v1"
 )
 
-def load_markdown_with_metadata(file_path):
+def load_markdown_with_metadata(file_path: Union[str, Path]) -> Document:
+    """
+    Load a markdown file with YAML frontmatter and extract metadata.
+    
+    Parses YAML frontmatter from the beginning of the file and extracts metadata.
+    If no title is found in the frontmatter, uses the filename as the title.
+    
+    Parameters:
+        file_path: Path to the markdown file, can be a string or Path object
+    
+    Returns:
+        Document object with parsed content and metadata
+    """
     with open(file_path, 'r', encoding='utf-8') as f:
         content = f.read()
 
@@ -82,12 +95,24 @@ def load_markdown_with_metadata(file_path):
     
     # Add the file name if no title exists
     if 'title' not in metadata:
-        metadata['title'] = file_path.stem
+        metadata['title'] = Path(file_path).stem
 
     return Document(page_content=body, metadata=metadata)
 
-def format_docs_with_sources(docs):
-    """Format documents with source attribution"""
+def format_docs_with_sources(docs: List[Document]) -> str:
+    """
+    Format a list of documents with numbered source attribution labels.
+    
+    Creates formatted text blocks with source information extracted from document
+    metadata. Supports URL sources, PDF page sources, or generic numbering.
+    
+    Parameters:
+        docs: List of Document objects to format with source attribution
+    
+    Returns:
+        Formatted string with documents separated by horizontal rules and
+        prefixed with source labels in the format [Bron X: URL/info]
+    """
     formatted = []
     for i, doc in enumerate(docs, 1):
         if 'url' in doc.metadata and doc.metadata['url']:
@@ -101,7 +126,7 @@ def format_docs_with_sources(docs):
     
     return "\n\n---\n\n".join(formatted)
 
-def deduplicate_sources(response):
+def deduplicate_sources(response: str) -> str:
     """
     Post-process the response to remove duplicate sources in the Bronnen section.
     Keeps only the first occurrence of each unique URL and renumbers sources sequentially.
@@ -201,7 +226,19 @@ rag_chain = (
     | deduplicate_sources  # Add deduplication as final step
 )
 
-def ask_and_print(question):
+def ask_and_print(question: str) -> None:
+    """
+    Ask a question to the RAG chain and print the response.
+    
+    Invokes the RAG chain with the provided question and prints both the
+    question and the formatted answer to stdout.
+    
+    Parameters:
+        question: The question to ask the RAG system
+    
+    Returns:
+        None
+    """
     print(f"\n--- Question: {question} ---")
     response = rag_chain.invoke(question)
     print(f"Answer:\n{response}")
