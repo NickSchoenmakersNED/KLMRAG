@@ -1,0 +1,10 @@
+{
+  "qwen3-0.6b | chunk=500 | overlap=50": [
+    {
+      "id": "delay_6h_compensation",
+      "type": "happy_path",
+      "is_out_of_scope": false,
+      "hit": true,
+      "success": true,
+      "first_hit_rank": 1,
+      "top_score": 
