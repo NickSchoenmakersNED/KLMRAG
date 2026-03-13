@@ -8,7 +8,7 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough, RunnableParallel
+from langchain_core.runnables import RunnablePassthrough, RunnableParallel, RunnableLambda
 from typing import List, Union
 
 print("Start")
@@ -16,7 +16,7 @@ print("Start")
 # Define your custom system prompt with reference instructions
 SYSTEM_PROMPT = """Je bent een vriendelijke en behulpzame KLM klantenservice assistent die gespecialiseerd is in passagiersrechten en compensaties/terugbetalingen.
 
-Gebruik de volgende context om de vraag van de klant te beantwoorden. Elke context sectie begint met een [Bron X: URL] label:
+Gebruik de volgende context om de vraag van de klant te beantwoorden. Elke context sectie begint met een [Bron X: ...] label:
 
 {context}
 
@@ -28,27 +28,10 @@ Belangrijke richtlijnen:
 - Als je het antwoord niet weet op basis van de context, zeg dat eerlijk
 
 KRITIEK BELANGRIJK - Bronvermelding regels:
-1. Gebruik ALLEEN de bronnummers die in de context staan (Bron 1, Bron 2, Bron 3, etc.)
+1. Gebruik ALLEEN bronnummers die in de context staan (Bron 1, Bron 2, Bron 3, etc.)
 2. Plaats [Bron X] inline direct na informatie uit die specifieke bron
-3. Als je informatie uit [Bron 1: url] gebruikt, vermeld dan [Bron 1] in je tekst
-4. Aan het einde: Maak een "Bronnen:" sectie
-5. In de Bronnen sectie: Vermeld ALLEEN de bronnen die je daadwerkelijk inline gerefereerd hebt
-6. Kopieer de exacte URL uit het [Bron X: URL] label in de context
-7. Elke URL mag maar ÉÉN keer in de lijst voorkomen
-8. Als dezelfde bron meerdere keren relevant is, gebruik dan meerdere keren hetzelfde nummer inline maar vermeld de URL slechts één keer in de lijst
-
-CORRECT voorbeeld:
-Context bevat: [Bron 1: https://example.com/a] en [Bron 2: https://example.com/b]
-Antwoord: "U heeft recht op €600 [Bron 1]. De regeling geldt ook voor vertraagde vluchten [Bron 1] en annuleringen [Bron 2].
-
-Bronnen:
-1. https://example.com/a
-2. https://example.com/b"
-
-FOUT - NIET DOEN:
-- [Bron 3] gebruiken als je maar 2 bronnen hebt gekregen
-- Een URL twee keer in de lijst zetten
-- Bronnen in de lijst zetten die je niet inline hebt gebruikt
+3. Gebruik nooit een bronnummer dat niet in de context voorkomt
+4. Voeg GEEN "Bronnen:" of "Sources:" sectie toe; alleen de antwoordtekst met inline [Bron X]
 
 Vraag: {question}
 
@@ -194,6 +177,167 @@ def deduplicate_sources(response: str) -> str:
     
     return response
 
+def _collapse_duplicate_inline_citations(text: str) -> str:
+    """
+    Collapse repeated inline citations like:
+    [Bron 1], [Bron 1] -> [Bron 1]
+    [Bron 1] [Bron 1] -> [Bron 1]
+    [Bron 1] en [Bron 1] -> [Bron 1]
+    """
+    pattern = re.compile(
+        r"([Bron\s+\d+])(?:\s*,\s*|\s+en\s+|\s+)(\1)",
+        flags=re.IGNORECASE
+    )
+
+    prev = None
+    curr = text
+    while curr != prev:
+        prev = curr
+        curr = pattern.sub(r"\1", curr)
+
+    return curr
+
+def _source_reference(doc: Document) -> str:
+    """
+    Build a stable human-readable source reference for one retrieved document.
+    Priority: url > pdf source+page > title > fallback.
+    """
+    if doc.metadata.get("url"):
+        return str(doc.metadata["url"])
+
+    if doc.metadata.get("source"):
+        page = doc.metadata.get("page")
+        if page is not None:
+            return f"{doc.metadata['source']} (pagina {page})"
+        return str(doc.metadata["source"])
+
+    if doc.metadata.get("title"):
+        return str(doc.metadata["title"])
+
+    return "Onbekende bron"
+
+
+def _strip_model_sources_section(text: str) -> str:
+    """
+    Remove any model-generated Bronnen/Sources section.
+    We generate sources ourselves to keep numbering consistent.
+    """
+    match = re.search(r"\n\s*(Bronnen|Sources)\s*:\s*\n", text, flags=re.IGNORECASE)
+    if not match:
+        return text.strip()
+    return text[:match.start()].strip()
+
+
+def _source_key_and_label(doc: Document) -> tuple:
+    """
+    Return a dedupe key + display label for a source.
+    URL sources are deduped by normalized URL.
+    Non-URL sources are deduped by their rendered reference.
+    """
+    url = doc.metadata.get("url")
+    if url:
+        url_text = str(url).strip()
+        # Normalize for dedupe (case-insensitive, ignore trailing slash)
+        url_key = url_text.rstrip("/").lower()
+        return ("url", url_key), url_text
+
+    label = _source_reference(doc).strip()
+    return ("ref", label), label
+
+
+def _extract_citation_numbers(text: str) -> List[int]:
+    """
+    Extract source numbers from citation blocks like:
+    [Bron 1], [Bron 1, Bron 2, Bron 3], [Bron 1 en 2]
+    """
+    numbers: List[int] = []
+
+    # Scan every [...] block and keep only ones that mention "Bron"
+    for block in re.findall(r"\[([^\]]+)\]", text):
+        if not re.search(r"\bbron\b", block, flags=re.IGNORECASE):
+            continue
+        for n in re.findall(r"\d+", block):
+            numbers.append(int(n))
+
+    return numbers
+
+
+def _rewrite_citation_blocks(text: str, old_to_new: dict) -> str:
+    """
+    Rewrite citation blocks to normalized inline citations:
+    [Bron 1, Bron 2] -> [Bron 1] [Bron 2]
+    Invalid source ids are removed.
+    """
+    def repl(match: re.Match) -> str:
+        block = match.group(1)
+
+        if not re.search(r"\bbron\b", block, flags=re.IGNORECASE):
+            return match.group(0)
+
+        nums = [int(n) for n in re.findall(r"\d+", block)]
+        mapped = []
+        seen = set()
+
+        for n in nums:
+            if n in old_to_new:
+                new_n = old_to_new[n]
+                if new_n not in seen:
+                    seen.add(new_n)
+                    mapped.append(new_n)
+
+        if not mapped:
+            return ""
+
+        return " ".join(f"[Bron {n}]" for n in mapped)
+
+    return re.sub(r"\[([^\]]+)\]", repl, text)
+
+
+def finalize_response_with_sources(answer: str, docs: List[Document]) -> str:
+    """
+    Make citations deterministic:
+    - Remove model-written source list
+    - Keep only valid source ids that exist in retrieved docs
+    - Renumber in order of first appearance
+    - Deduplicate by URL (fallback: reference label)
+    - Always generate Bronnen when at least one valid citation exists
+    """
+    cleaned = _strip_model_sources_section(answer)
+
+    found_numbers = _extract_citation_numbers(cleaned)
+
+    valid_in_order = []
+    seen_ids = set()
+    for n in found_numbers:
+        if 1 <= n <= len(docs) and n not in seen_ids:
+            seen_ids.add(n)
+            valid_in_order.append(n)
+
+    old_to_new = {}
+    source_key_to_new = {}
+    deduped_labels = []
+
+    for old_n in valid_in_order:
+        key, label = _source_key_and_label(docs[old_n - 1])
+
+        if key not in source_key_to_new:
+            source_key_to_new[key] = len(deduped_labels) + 1
+            deduped_labels.append(label)
+
+        old_to_new[old_n] = source_key_to_new[key]
+
+    normalized_body = _rewrite_citation_blocks(cleaned, old_to_new)
+    normalized_body = _collapse_duplicate_inline_citations(normalized_body)
+    normalized_body = re.sub(r"[ \t]{2,}", " ", normalized_body)
+    normalized_body = re.sub(r"\s+([,.;:!?])", r"\1", normalized_body)
+    normalized_body = normalized_body.strip()
+
+    if not deduped_labels:
+        return normalized_body
+
+    source_lines = [f"{i}. {label}" for i, label in enumerate(deduped_labels, start=1)]
+    return normalized_body + "\n\nBronnen:\n" + "\n".join(source_lines)
+
 # Load documents
 loader = PyPDFLoader("data\\raw\\cellar_439cd3a7-fd3c-4da7-8bf4-b0f60600c1d6.0004.02_DOC_1.pdf")
 pages = loader.load()
@@ -212,35 +356,18 @@ retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 # Create prompt template
 prompt = ChatPromptTemplate.from_template(SYSTEM_PROMPT)
 
-# Build the RAG chain using LCEL with post-processing
-rag_chain = (
-    RunnableParallel(
-        {
-            "context": retriever | format_docs_with_sources,
-            "question": RunnablePassthrough()
-        }
-    )
-    | prompt
-    | llm
-    | StrOutputParser()
-    | deduplicate_sources  # Add deduplication as final step
-)
+# Keep this pure generation chain (no source post-processing yet)
+generation_chain = prompt | llm | StrOutputParser()
+
+def ask(question: str) -> str:
+    docs = retriever.invoke(question)
+    context = format_docs_with_sources(docs)
+    raw_answer = generation_chain.invoke({"context": context, "question": question})
+    return finalize_response_with_sources(raw_answer, docs)
 
 def ask_and_print(question: str) -> None:
-    """
-    Ask a question to the RAG chain and print the response.
-    
-    Invokes the RAG chain with the provided question and prints both the
-    question and the formatted answer to stdout.
-    
-    Parameters:
-        question: The question to ask the RAG system
-    
-    Returns:
-        None
-    """
     print(f"\n--- Question: {question} ---")
-    response = rag_chain.invoke(question)
+    response = ask(question)
     print(f"Answer:\n{response}")
     print("-" * 50)
 
