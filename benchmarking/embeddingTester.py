@@ -12,6 +12,10 @@ Metrics:
 Special handling for out_of_scope entries: a retrieval HIT is counted as a
 FAILURE (the system should not have returned in-scope content). Their success
 flag is inverted so they don't silently distort global and per-type recall.
+
+Each config is run NUM_RUNS times. Per-question metrics are averaged across
+runs before reporting. success_rate is a float in [0.0, 1.0]; a question is
+considered successful if success_rate >= 0.5.
 """
 
 import json
@@ -32,32 +36,166 @@ from eval_dataset import EVAL_SET
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
+NUM_RUNS = 3  # Number of times each config is run before averaging
+
 EMBEDDING_CONFIGS = [
+    # {
+    #     "label": "qwen3-0.6b | chunk=500 | overlap=50 | k=3",
+    #     "model": "text-embedding-qwen3-embedding-0.6b",
+    #     "chunk_size": 500,
+    #     "chunk_overlap": 50,
+    #     "k": 3,
+    # },
+    # {
+    #     "label": "qwen3-0.6b | chunk=600 | overlap=50 | k=3",
+    #     "model": "text-embedding-qwen3-embedding-0.6b",
+    #     "chunk_size": 600,
+    #     "chunk_overlap": 50,
+    #     "k": 3,
+    # },
+    #     ──────────────────────────────────────────────────────────────────────
+    #   edge_case     4.00/5  (80%)  ████░
+    #   happy_path    10.00/12  (83%)  ██████████░░
+    #   misleading    3.00/4  (75%)  ███░
+    #   noisy_input   4.00/4  (100%)  ████
+    # ──────────────────────────────────────────────────────────────────────
+    #   TOTAL         21.00/25  (84%)
     {
-        "label": "qwen3-0.6b | chunk=500 | overlap=50",
+        "label": "qwen3-0.6b | chunk=600 | overlap=50 | k=4",
         "model": "text-embedding-qwen3-embedding-0.6b",
-        "chunk_size": 500,
+        "chunk_size": 600,
         "chunk_overlap": 50,
-        "k": 3,
+        "k": 4,
     },
-    {
-        "label": "qwen3-0.6b | chunk=300 | overlap=50",
-        "model": "text-embedding-qwen3-embedding-0.6b",
-        "chunk_size": 300,
-        "chunk_overlap": 50,
-        "k": 3,
-    },
-    {
-        "label": "qwen3-0.6b | chunk=500 | overlap=100",
-        "model": "text-embedding-qwen3-embedding-0.6b",
-        "chunk_size": 500,
-        "chunk_overlap": 100,
-        "k": 3,
-    },
-    # Add more configs to compare — swap model name when you have a second model
+    #     ──────────────────────────────────────────────────────────────────────
+    #   edge_case     5.00/5  (100%)  █████
+    #   happy_path    11.00/12  (92%)  ███████████░
+    #   misleading    3.00/4  (75%)  ███░
+    #   noisy_input   4.00/4  (100%)  ████
+    # ──────────────────────────────────────────────────────────────────────
+    #   TOTAL         23.00/25  (92%)
+    # {
+    #     "label": "qwen3-0.6b | chunk=600 | overlap=50 | k=4",
+    #     "model": "text-embedding-qwen3-embedding-0.6b",
+    #     "chunk_size": 600,
+    #     "chunk_overlap": 75,
+    #     "k": 4,
+    # },
+    #     ──────────────────────────────────────────────────────────────────────
+    #   edge_case     5.00/5  (100%)  █████
+    #   happy_path    11.00/12  (92%)  ███████████░
+    #   misleading    2.00/4  (50%)  ██░░
+    #   noisy_input   4.00/4  (100%)  ████
+    # ──────────────────────────────────────────────────────────────────────
+    #   TOTAL         22.00/25  (88%)
+    #     ──────────────────────────────────────────────────────────────────────
+    #   edge_case     5.00/5  (100%)  █████
+    #   happy_path    11.00/12  (92%)  ███████████░
+    #   misleading    2.00/4  (50%)  ██░░
+    #   noisy_input   4.00/4  (100%)  ████
+    # ──────────────────────────────────────────────────────────────────────
+    #   TOTAL         22.00/25  (88%)
+    # {
+    #     "label": "qwen3-0.6b | chunk=700 | overlap=50 | k=4",
+    #     "model": "text-embedding-qwen3-embedding-0.6b",
+    #     "chunk_size": 700,
+    #     "chunk_overlap": 50,
+    #     "k": 4,
+    # },
+    #     ──────────────────────────────────────────────────────────────────────
+    #   edge_case     5.00/5  (100%)  █████
+    #   happy_path    12.00/12  (100%)  ████████████
+    #   misleading    2.00/4  (50%)  ██░░
+    #   noisy_input   4.00/4  (100%)  ████
+    # ──────────────────────────────────────────────────────────────────────
+    #   TOTAL         23.00/25  (92%)
+    # {
+    #     "label": "qwen3-0.6b | chunk=500 | overlap=50 | k=5",
+    #     "model": "text-embedding-qwen3-embedding-0.6b",
+    #     "chunk_size": 500,
+    #     "chunk_overlap": 50,
+    #     "k": 5,
+    # },
+    #     ──────────────────────────────────────────────────────────────────────
+    #   edge_case     5.00/5  (100%)  █████
+    #   happy_path    11.00/12  (92%)  ███████████░
+    #   misleading    2.00/4  (50%)  ██░░
+    #   noisy_input   4.00/4  (100%)  ████
+    # ──────────────────────────────────────────────────────────────────────
+    #   TOTAL         22.00/25  (88%)
+    # {
+    #     "label": "qwen3-0.6b | chunk=600 | overlap=50 | k=5",
+    #     "model": "text-embedding-qwen3-embedding-0.6b",
+    #     "chunk_size": 600,
+    #     "chunk_overlap": 50,
+    #     "k": 5,
+    # },
+    #     ──────────────────────────────────────────────────────────────────────
+    #   edge_case     5.00/5  (100%)  █████
+    #   happy_path    11.00/12  (92%)  ███████████░
+    #   misleading    3.00/4  (75%)  ███░
+    #   noisy_input   4.00/4  (100%)  ████
+    # ──────────────────────────────────────────────────────────────────────
+    #   TOTAL         23.00/25  (92%)
+    # {
+    #     "label": "qwen3-0.6b | chunk=600 | overlap=50 | k=5",
+    #     "model": "text-embedding-qwen3-embedding-0.6b",
+    #     "chunk_size": 600,
+    #     "chunk_overlap": 75,
+    #     "k": 5,
+    # },
+    #     ──────────────────────────────────────────────────────────────────────
+    #   edge_case     5.00/5  (100%)  █████
+    #   happy_path    11.00/12  (92%)  ███████████░
+    #   misleading    2.00/4  (50%)  ██░░
+    #   noisy_input   4.00/4  (100%)  ████
+    # ──────────────────────────────────────────────────────────────────────
+    # {
+    #     "label": "qwen3-0.6b | chunk=600 | overlap=50 | k=5",
+    #     "model": "text-embedding-qwen3-embedding-0.6b",
+    #     "chunk_size": 700,
+    #     "chunk_overlap": 50,
+    #     "k": 5,
+    # },
+    #     ──────────────────────────────────────────────────────────────────────
+    #   edge_case     5.00/5  (100%)  █████
+    #   happy_path    12.00/12  (100%)  ████████████
+    #   misleading    2.00/4  (50%)  ██░░
+    #   noisy_input   4.00/4  (100%)  ████
+    # ──────────────────────────────────────────────────────────────────────
+    #   TOTAL         23.00/25  (92%)
+    # {
+    #     "label": "qwen3-0.6b | chunk=400 | overlap=50 | k=3",
+    #     "model": "text-embedding-qwen3-embedding-0.6b",
+    #     "chunk_size": 400,
+    #     "chunk_overlap": 50,
+    #     "k": 3,
+    # },
+    # {
+    #     "label": "qwen3-0.6b | chunk=250 | overlap=25 | k=6",
+    #     "model": "text-embedding-qwen3-embedding-0.6b",
+    #     "chunk_size": 250,
+    #     "chunk_overlap": 25,
+    #     "k": 6,
+    # },
+    # {
+    #     "label": "qwen3-0.6b | chunk=100 | overlap=10 | k=10",
+    #     "model": "text-embedding-qwen3-embedding-0.6b",
+    #     "chunk_size": 100,
+    #     "chunk_overlap": 10,
+    #     "k": 10,
+    # },
+    # {
+    #     "label": "qwen3-0.6b | chunk=1000 | overlap=100 | k=2",
+    #     "model": "text-embedding-qwen3-embedding-0.6b",
+    #     "chunk_size": 1000,
+    #     "chunk_overlap": 100,
+    #     "k": 2,
+    # },
 ]
 
 BASE_URL = "http://localhost:1234/v1"
+
 PDF_PATH = r"data\raw\cellar_439cd3a7-fd3c-4da7-8bf4-b0f60600c1d6.0004.02_DOC_1.pdf"
 MD_DIR   = "data/processed"
 
@@ -102,24 +240,52 @@ class RetrievalResult:
     notes: str = ""
 
 
+@dataclass
+class AveragedResult:
+    """Per-question metrics averaged across NUM_RUNS runs."""
+    question_id: str
+    question: str
+    question_type: str
+    is_out_of_scope: bool
+    expected_keywords: list[str]
+    notes: str
+
+    success_rate: float            # fraction of runs where success=True  (0.0–1.0)
+    hit_rate: float                # fraction of runs where hit=True
+    avg_top_score: float           # mean cosine similarity of rank-1 chunk
+    avg_first_hit_rank: float      # mean rank of first hit (None runs use k+1 as sentinel)
+
+    # Derived for reporting
+    success: bool = field(init=False)          # success_rate >= 0.5
+    first_hit_rank: Optional[float] = field(init=False)  # None if avg rank == sentinel
+
+    # Representative previews from the last run
+    retrieved_previews: list[str] = field(default_factory=list)
+
+    _k_sentinel: int = field(repr=False, default=0)  # k+1 used for None ranks
+
+    def __post_init__(self):
+        self.success = self.success_rate >= 0.5
+        # If the average rank equals the sentinel, nothing was ever found
+        self.first_hit_rank = (
+            None if self.avg_first_hit_rank >= self._k_sentinel
+            else self.avg_first_hit_rank
+        )
+
+
 def chunk_contains_keyword(chunk_text: str, keywords: list[str]) -> bool:
     text = chunk_text.lower()
     return any(kw.lower() in text for kw in keywords)
 
 
-def run_retrieval_test(config: dict, docs: list) -> list[RetrievalResult]:
+def run_single(config: dict, docs: list, chunks: list) -> list[RetrievalResult]:
+    """One retrieval pass over the eval set. Chunks are pre-split."""
     embeddings = OpenAIEmbeddings(
         check_embedding_ctx_length=False,
         model=config["model"],
         api_key="not-needed",
         base_url=BASE_URL,
     )
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=config["chunk_size"],
-        chunk_overlap=config["chunk_overlap"],
-    )
-    chunks = splitter.split_documents(docs)
 
     vectorstore = FAISS.from_documents(chunks, embeddings)
     k = config["k"]
@@ -137,7 +303,6 @@ def run_retrieval_test(config: dict, docs: list) -> list[RetrievalResult]:
                 break
 
         hit = first_hit_rank is not None
-        # For out_of_scope entries, success means the keywords were NOT retrieved.
         success = (not hit) if is_out_of_scope else hit
 
         top_score = hits_with_scores[0][1] if hits_with_scores else 0.0
@@ -160,43 +325,131 @@ def run_retrieval_test(config: dict, docs: list) -> list[RetrievalResult]:
     return results
 
 
+def average_runs(
+    all_runs: list[list[RetrievalResult]],
+    k: int,
+) -> list[AveragedResult]:
+    """Collapse NUM_RUNS result lists into one averaged list, ordered by question_id."""
+    sentinel = k + 1  # rank assigned when a question was never hit in a run
+
+    # Index runs by question_id
+    by_id: dict[str, list[RetrievalResult]] = defaultdict(list)
+    for run in all_runs:
+        for r in run:
+            by_id[r.question_id].append(r)
+
+    averaged = []
+    for qid, runs in by_id.items():
+        ref = runs[0]  # use first run for stable fields
+        n = len(runs)
+
+        success_rate      = sum(r.success    for r in runs) / n
+        hit_rate          = sum(r.hit        for r in runs) / n
+        avg_top_score     = sum(r.top_score  for r in runs) / n
+        avg_first_hit_rank = sum(
+            (r.first_hit_rank if r.first_hit_rank is not None else sentinel)
+            for r in runs
+        ) / n
+
+        # Previews from the last run (most recent context for debugging)
+        previews = runs[-1].retrieved_previews
+
+        averaged.append(AveragedResult(
+            question_id=qid,
+            question=ref.question,
+            question_type=ref.question_type,
+            is_out_of_scope=ref.is_out_of_scope,
+            expected_keywords=ref.expected_keywords,
+            notes=ref.notes,
+            success_rate=success_rate,
+            hit_rate=hit_rate,
+            avg_top_score=avg_top_score,
+            avg_first_hit_rank=avg_first_hit_rank,
+            retrieved_previews=previews,
+            _k_sentinel=sentinel,
+        ))
+
+    # Preserve original eval set ordering
+    order = {entry["id"]: i for i, entry in enumerate(EVAL_SET)}
+    averaged.sort(key=lambda r: order.get(r.question_id, 9999))
+    return averaged
+
+
+def run_retrieval_test(config: dict, docs: list) -> list[AveragedResult]:
+    """Split once, embed NUM_RUNS times, return averaged results."""
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=config["chunk_size"],
+        chunk_overlap=config["chunk_overlap"],
+    )
+    chunks = splitter.split_documents(docs)
+
+    all_runs: list[list[RetrievalResult]] = []
+    for run_idx in range(1, NUM_RUNS + 1):
+        print(f"  run {run_idx}/{NUM_RUNS}...", end=" ", flush=True)
+        run_results = run_single(config, docs, chunks)
+        all_runs.append(run_results)
+        successes = sum(1 for r in run_results if r.success)
+        print(f"success {successes}/{len(run_results)}")
+
+    return average_runs(all_runs, k=config["k"])
+
+
 # ── Reporting ─────────────────────────────────────────────────────────────────
 
-def _type_breakdown(results: list[RetrievalResult]) -> dict[str, tuple[int, int]]:
-    """Returns {question_type: (successes, total)} sorted by type name."""
-    by_type: dict[str, list[RetrievalResult]] = defaultdict(list)
+def _type_breakdown(results: list[AveragedResult]) -> dict[str, tuple[float, int]]:
+    """Returns {question_type: (avg_successes, total)} sorted by type name."""
+    by_type: dict[str, list[AveragedResult]] = defaultdict(list)
     for r in results:
         by_type[r.question_type].append(r)
     return {
-        qtype: (sum(1 for r in group if r.success), len(group))
+        qtype: (sum(r.success_rate for r in group), len(group))
         for qtype, group in sorted(by_type.items())
     }
 
 
-def print_report(config_label: str, results: list[RetrievalResult]):
-    total    = len(results)
-    successes = sum(1 for r in results if r.success)
+def print_report(config_label: str, results: list[AveragedResult]):
+    total     = len(results)
+    # Sum of success_rates gives effective successes across runs
+    eff_succ  = sum(r.success_rate for r in results)
 
     print(f"\n{'=' * 70}")
-    print(f"CONFIG: {config_label}")
-    print(f"Overall success@k: {successes}/{total}  ({100 * successes / total:.0f}%)")
+    print(f"CONFIG: {config_label}  (averaged over {NUM_RUNS} runs)")
+    print(f"Overall success@k: {eff_succ:.2f}/{total}  ({100 * eff_succ / total:.0f}%)")
     print(f"  (out_of_scope entries: success = keyword NOT retrieved)")
     print(f"{'=' * 70}")
 
     for r in results:
         if r.is_out_of_scope:
             status   = "✓ CLEAN" if r.success else "✗ LEAK"
-            rank_str = "correctly absent" if r.success else f"leaked at rank {r.first_hit_rank}"
+            rank_str = (
+                "correctly absent"
+                if r.first_hit_rank is None
+                else f"leaked ~rank {r.first_hit_rank:.1f}"
+            )
         else:
             status   = "✓ HIT" if r.success else "✗ MISS"
-            rank_str = f"rank {r.first_hit_rank}" if r.first_hit_rank else "not found"
+            rank_str = (
+                f"~rank {r.first_hit_rank:.1f}" if r.first_hit_rank is not None
+                else "not found"
+            )
 
-        print(f"\n[{status}] {r.question_id} ({rank_str}) | top_score={r.top_score:.4f} | type={r.question_type}")
+        print(
+            f"\n[{status}] {r.question_id} ({rank_str}) | "
+            f"top_score={r.avg_top_score:.4f} | "
+            f"success_rate={r.success_rate:.2f} | "
+            f"type={r.question_type}"
+        )
         print(f"  Q: {r.question[:80]}")
         print(f"  Keywords: {r.expected_keywords}")
+
+        # Mark the average hit rank position (rounded) in the preview list
+        avg_rank_int = (
+            round(r.first_hit_rank) if r.first_hit_rank is not None else None
+        )
         for i, preview in enumerate(r.retrieved_previews, 1):
-            marker = "  >>>" if (r.first_hit_rank == i) else "     "
+            marker = "  >>>" if avg_rank_int == i else "     "
             print(f"{marker} [{i}] {preview}")
+
         if r.notes:
             print(f"  note: {r.notes}")
 
@@ -207,16 +460,17 @@ def print_report(config_label: str, results: list[RetrievalResult]):
     print(f"\n{'─' * 70}")
     print("BREAKDOWN BY TYPE")
     print(f"{'─' * 70}")
-    for qtype, (s, t) in breakdown.items():
-        pct = 100 * s / t
-        bar = "█" * s + "░" * (t - s)
-        print(f"  {qtype:<{col_w}} {s}/{t}  ({pct:.0f}%)  {bar}")
+    for qtype, (eff_s, t) in breakdown.items():
+        pct = 100 * eff_s / t
+        filled = round(eff_s)
+        bar = "█" * filled + "░" * (t - filled)
+        print(f"  {qtype:<{col_w}} {eff_s:.2f}/{t}  ({pct:.0f}%)  {bar}")
     print(f"{'─' * 70}")
-    print(f"  {'TOTAL':<{col_w}} {successes}/{total}  ({100 * successes / total:.0f}%)")
+    print(f"  {'TOTAL':<{col_w}} {eff_succ:.2f}/{total}  ({100 * eff_succ / total:.0f}%)")
 
 
 def save_results(all_results: dict):
-    """Save raw results to JSON for later analysis."""
+    """Save averaged results to JSON for later analysis."""
     serializable = {}
     for label, results in all_results.items():
         serializable[label] = [
@@ -224,10 +478,14 @@ def save_results(all_results: dict):
                 "id": r.question_id,
                 "type": r.question_type,
                 "is_out_of_scope": r.is_out_of_scope,
-                "hit": r.hit,
                 "success": r.success,
-                "first_hit_rank": r.first_hit_rank,
-                "top_score": r.top_score,
+                "success_rate": round(r.success_rate, 4),
+                "hit_rate": round(r.hit_rate, 4),
+                "avg_first_hit_rank": (
+                    round(r.avg_first_hit_rank, 2)
+                    if r.first_hit_rank is not None else None
+                ),
+                "avg_top_score": round(r.avg_top_score, 6),
                 "previews": r.retrieved_previews,
             }
             for r in results
@@ -244,10 +502,10 @@ if __name__ == "__main__":
     docs = load_all_docs()
     print(f"Loaded {len(docs)} documents")
 
-    all_results: dict[str, list[RetrievalResult]] = {}
+    all_results: dict[str, list[AveragedResult]] = {}
 
     for config in EMBEDDING_CONFIGS:
-        print(f"\nRunning config: {config['label']}")
+        print(f"\nRunning config: {config['label']}  ({NUM_RUNS} runs)")
         results = run_retrieval_test(config, docs)
         print_report(config["label"], results)
         all_results[config["label"]] = results
@@ -262,7 +520,6 @@ if __name__ == "__main__":
     print("CROSS-CONFIG SUMMARY")
     print(f"{'=' * 70}")
 
-    # Header
     label_w = max(len(lbl) for lbl in all_results) + 2
     header  = f"  {'TYPE':<{col_w}}" + "".join(f"  {lbl:<{label_w}}" for lbl in all_results)
     print(header)
@@ -272,11 +529,11 @@ if __name__ == "__main__":
         row = f"  {qtype:<{col_w}}"
         for label, results in all_results.items():
             if qtype == "TOTAL":
-                s = sum(1 for r in results if r.success)
+                eff_s = sum(r.success_rate for r in results)
                 t = len(results)
             else:
                 group = [r for r in results if r.question_type == qtype]
-                s = sum(1 for r in group if r.success)
+                eff_s = sum(r.success_rate for r in group)
                 t = len(group)
-            row += f"  {s}/{t} ({100*s/t:.0f}%){'':<{label_w - 10}}"
+            row += f"  {eff_s:.2f}/{t} ({100*eff_s/t:.0f}%){'':<{label_w - 14}}"
         print(row)
