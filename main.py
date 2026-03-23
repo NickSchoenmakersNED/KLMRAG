@@ -21,17 +21,16 @@ Gebruik de volgende context om de vraag van de klant te beantwoorden. Elke conte
 {context}
 
 Belangrijke richtlijnen:
-- Spreek de klant altijd aan met "u"
-- Antwoord altijd in de taal van de vraag (Nederlands of Engels)
-- Wees duidelijk en direct over compensatiebedragen en rechten
-- Verwijs naar relevante EU verordeningen wanneer van toepassing
-- Als je het antwoord niet weet op basis van de context, zeg dat eerlijk
+- Spreek de klant altijd aan met "u".
+- Antwoord altijd in de taal van de vraag (Nederlands of Engels).
+- VERPLICHT: Wees extreem specifiek over compensatiebedragen. Zoek in de context naar regels omtrent afstanden en uren om het exacte bedrag (bijv. €250, €400 of €600) te bepalen.
+- Als een gebruiker specifieke steden noemt (zoals Istanbul en Amsterdam), schat dan zelf in onder welke afstandscategorie deze vlucht valt (bijv. meer dan 3500 km). Vraag de klant NIET om de afstand, maar bereken en noem direct het juiste bedrag.
+- Als je het antwoord puur op basis van de context niet weet, zeg dat dan eerlijk.
 
 KRITIEK BELANGRIJK - Bronvermelding regels:
-1. Gebruik ALLEEN bronnummers die in de context staan (Bron 1, Bron 2, Bron 3, etc.)
-2. Plaats [Bron X] inline direct na informatie uit die specifieke bron
-3. Gebruik nooit een bronnummer dat niet in de context voorkomt
-4. Voeg GEEN "Bronnen:" of "Sources:" sectie toe; alleen de antwoordtekst met inline [Bron X]
+1. Gebruik ALLEEN bronnummers die in de context staan (Bron 1, Bron 2, etc.).
+2. Plaats [Bron X] inline DIRECT na het feit of de regel die je uit die bron haalt. Controleer extreem kritisch of het feit daadwerkelijk uit die specifieke bron komt voordat je de tag plaatst!
+3. Voeg GEEN aparte "Bronnen:" sectie toe aan het einde; gebruik uitsluitend inline tags in de tekst.
 
 Vraag: {question}
 
@@ -347,7 +346,7 @@ md_docs = [load_markdown_with_metadata(p) for p in Path("data/processed").glob("
 all_docs = pages + md_docs
 
 # Split and create vector store
-splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=50)
 chunks = splitter.split_documents(all_docs)
 
 vectorstore = FAISS.from_documents(chunks, embeddings)
