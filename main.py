@@ -1,5 +1,8 @@
 import re
 import yaml
+import json
+from typing import Optional
+from dataclasses import dataclass, field
 from pathlib import Path
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import FAISS
@@ -10,8 +13,88 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableParallel, RunnableLambda
 from typing import List, Union
+from collections import deque
 
 print("Start")
+
+@dataclass
+class QueryClassification:
+    """Structured extraction of factual claims present in the user's query.
+    
+    Every field defaults to the 'absent' state so the rewriter knows
+    exactly what was and was NOT stated by the user.
+    """
+    has_hours: bool = False
+    hours_value: Optional[str] = None
+    has_compensation_amount: bool = False
+    compensation_value: Optional[str] = None
+    asks_about_compensation_or_refund: bool = False
+    has_origin: bool = False
+    origin: Optional[str] = None
+    has_destination: bool = False
+    destination: Optional[str] = None
+
+def merge_classification(
+    base: QueryClassification, update: QueryClassification
+) -> QueryClassification:
+    """Merge new extraction into existing state.
+
+    Only overwrites a field when the update extracted something (has_X=True).
+    Allows corrections: a new non-null value for an existing field wins.
+    Fields the update didn't find stay untouched from base.
+    """
+    return QueryClassification(
+        has_hours=update.has_hours or base.has_hours,
+        hours_value=update.hours_value if update.has_hours else base.hours_value,
+        has_compensation_amount=update.has_compensation_amount or base.has_compensation_amount,
+        compensation_value=update.compensation_value if update.has_compensation_amount else base.compensation_value,
+        asks_about_compensation_or_refund=update.asks_about_compensation_or_refund or base.asks_about_compensation_or_refund,
+        has_origin=update.has_origin or base.has_origin,
+        origin=update.origin if update.has_origin else base.origin,
+        has_destination=update.has_destination or base.has_destination,
+        destination=update.destination if update.has_destination else base.destination,
+    )
+
+EXTRACTION_PROMPT = """You are a fact-extraction module. You receive a customer question about air travel / passenger rights.
+
+Your ONLY job is to extract what the user LITERALLY stated. You must NEVER infer, assume, or add information that is not explicitly written.
+
+## Current known state
+The following JSON represents what has already been extracted from earlier messages in this conversation.
+Your task is to return an UPDATED version of this JSON incorporating any NEW facts from the user's latest message.
+
+Rules for updating:
+- If a field already has a value and the user does NOT mention that topic, KEEP the existing value unchanged.
+- If the user provides NEW information for a field, UPDATE that field.
+- If the user CORRECTS a previously known value (e.g. "actually it's 4 hours"), UPDATE it to the new value.
+- Only set a field to null / false if the user EXPLICITLY retracts it.
+
+Current state:
+{current_state}
+
+## Extraction rules
+Return a JSON object with exactly these keys:
+
+{{
+  "has_hours": true/false,
+  "hours_value": "<digit(s) as string>" or null,
+  "has_compensation_amount": true/false,
+  "compensation_value": "<amount as string, e.g. '400 euro'>" or null,
+  "asks_about_compensation_or_refund": true/false,
+  "has_origin": true/false,
+  "origin": "<city or country name>" or null,
+  "has_destination": true/false,
+  "destination": "<city or country name>" or null
+}}
+
+Rules:
+1. has_hours is true ONLY if the user wrote a number (digit) followed by a time word (uur, uren, hours, hour, h). Written-out numbers like "drie uur" do NOT count — only digits like "3 uur" or "6 hours".
+2. has_compensation_amount is true ONLY if the user mentions a specific monetary amount (e.g. "€400", "400 euro", "250 euros").
+3. asks_about_compensation_or_refund is true if the user asks about compensation, vergoeding, compensatie, refund, terugbetaling, geld terug, or similar.
+4. For origin/destination: determine which location is the departure and which is the arrival based on context words like "van", "vanuit", "from", "naar", "to", "richting". If the direction is ambiguous, set both has_origin and has_destination to false and leave values null.
+5. Return ONLY the JSON object. No explanation, no markdown, no backticks.
+
+User question: {question}"""
 
 # Define your custom system prompt with reference instructions
 SYSTEM_PROMPT = """Je bent een vriendelijke en behulpzame KLM klantenservice assistent die gespecialiseerd is in passagiersrechten en compensaties/terugbetalingen.
@@ -33,13 +116,16 @@ KRITIEK BELANGRIJK - Bronvermelding regels:
 3. Gebruik nooit een bronnummer dat niet in de context voorkomt
 4. Voeg GEEN "Bronnen:" of "Sources:" sectie toe; alleen de antwoordtekst met inline [Bron X]
 
+Conversatiegeschiedenis:
+{history}
+
 Vraag: {question}
 
 Antwoord:"""
 
 embeddings = OpenAIEmbeddings(
     check_embedding_ctx_length=False,
-    model="text-embedding-qwen3-embedding-0.6b",
+    model="text-embedding-qwen3-embedding-4b",
     api_key="not-needed",
     base_url="http://localhost:1234/v1" 
 )
@@ -49,6 +135,9 @@ llm = ChatOpenAI(
     api_key="not-needed",
     base_url="http://localhost:1234/v1"
 )
+
+extraction_prompt = ChatPromptTemplate.from_template(EXTRACTION_PROMPT)
+extraction_chain = extraction_prompt | llm | StrOutputParser()
 
 def load_markdown_with_metadata(file_path: Union[str, Path]) -> Document:
     """
@@ -359,11 +448,294 @@ prompt = ChatPromptTemplate.from_template(SYSTEM_PROMPT)
 # Keep this pure generation chain (no source post-processing yet)
 generation_chain = prompt | llm | StrOutputParser()
 
+REWRITE_PROMPT = """You are a query rewriter for a retrieval system about EU air passenger rights for the KLM airline.
+
+Rewrite the user's question into a single precise retrieval query. You are NOT answering the question.
+
+## Conversation history
+{history}
+
+## Pre-extracted facts from the user's query
+The following facts were extracted from the user's original question. This is the GROUND TRUTH of what the user said. You MUST respect these exactly.
+
+{extraction_block}
+
+## Core rules
+1. OUTPUT LANGUAGE: Write the rewritten query in the SAME language as the original question. Dutch in → Dutch out. English in → English out.
+2. Preserve ALL factual details that appear in the extraction above: route, delay duration, airline name, flight class, dates, flight numbers, amounts, disruption type.
+3. Add "EC 261/2004" only when the question is about delay, cancellation, denied boarding, or downgrade compensation.
+4. Do NOT add facts, amounts, distances, or legal thresholds the user did not mention.
+5. Do NOT add disruption types the user did not mention. If the user says "delay", do not add "cancellation" or "overbooking".
+6. Remove greetings, emotional language, and filler that adds no factual content.
+7. Return ONLY the rewritten query. No explanation, no preamble, no quotes.
+8. ALWAYS ensure that the generated sentance makes sense and is grammatically correct, even if the user query was not.
+9. Use conversation history to resolve references (e.g. "that flight", "same route", "what about cancellations?") but do NOT pull facts from history that the user did not repeat or reference in the current question.
+
+## CRITICAL constraints from extraction
+{constraint_block}
+
+Original: {question}
+Rewritten:"""
+
+rewrite_prompt = ChatPromptTemplate.from_template(REWRITE_PROMPT)
+rewrite_chain = rewrite_prompt | llm | StrOutputParser()
+
+# --- Required fields that must be present before the RAG pipeline runs ---
+REQUIRED_FIELDS = ["has_hours", "has_origin", "has_destination"]
+
+# Prompt that asks the LLM to generate a natural follow-up question
+# for the user, requesting the specific missing pieces of information.
+FOLLOWUP_PROMPT = """You are a friendly KLM customer service assistant.
+The customer asked a question but did not provide all necessary details.
+
+Original question: {question}
+
+The following information is still missing:
+{missing_fields_description}
+
+Write a short, polite follow-up message asking the customer to provide
+the missing information. Write in the SAME language as the original question.
+Do NOT answer the question yet. Do NOT guess or assume any values.
+Return ONLY the follow-up message."""
+
+followup_prompt = ChatPromptTemplate.from_template(FOLLOWUP_PROMPT)
+followup_chain = followup_prompt | llm | StrOutputParser()
+
+
+# Human-readable descriptions for each required field, in Dutch and English.
+# Used to tell the LLM what to ask for.
+FIELD_DESCRIPTIONS = {
+    "has_hours": "the duration of the delay in hours (e.g. 3 hours, 6 hours)",
+    "has_origin": "the departure city or airport",
+    "has_destination": "the destination city or airport",
+}
+
+# Conversation history: stores up to 10 (question, answer) pairs, in-memory only
+conversation_history: deque[dict] = deque(maxlen=10)
+
+
+def format_history(history: deque[dict]) -> str:
+    """Format history into a readable block for prompt injection."""
+    if not history:
+        return "Geen eerdere conversatie."
+    lines = []
+    for turn in history:
+        lines.append(f"Klant: {turn['question']}")
+        lines.append(f"Assistent: {turn['answer']}")
+    return "\n".join(lines)
+
+def get_missing_fields(clf: QueryClassification) -> list[str]:
+    """Check which required fields are still absent in the classification.
+
+    Returns a list of human-readable descriptions for every missing field.
+    Empty list means the classification is complete.
+    """
+    missing = []
+    for field_name in REQUIRED_FIELDS:
+        if not getattr(clf, field_name):
+            missing.append(FIELD_DESCRIPTIONS[field_name])
+    return missing
+
+
+def ask_followup(question: str, missing: list[str]) -> str:
+    """Use the LLM to generate a natural follow-up question for the user.
+
+    Takes the original question and a list of plain-language descriptions
+    of what's missing, and returns a conversational prompt for the user.
+    """
+    missing_text = "\n".join(f"- {m}" for m in missing)
+    return followup_chain.invoke({
+        "question": question,
+        "missing_fields_description": missing_text,
+    })
+
+def classify_query(
+    question: str, current: Optional[QueryClassification] = None
+) -> QueryClassification:
+    """Extract factual claims from the user's query.
+
+    When a current classification is provided, the LLM sees it as context
+    and is instructed to preserve existing fields unless the user updates them.
+    Falls back to an empty classification on parse failure.
+    """
+    # Serialize current state for the prompt (empty defaults if no prior state)
+    if current is None:
+        current = QueryClassification()
+
+    current_state = json.dumps({
+        "has_hours": current.has_hours,
+        "hours_value": current.hours_value,
+        "has_compensation_amount": current.has_compensation_amount,
+        "compensation_value": current.compensation_value,
+        "asks_about_compensation_or_refund": current.asks_about_compensation_or_refund,
+        "has_origin": current.has_origin,
+        "origin": current.origin,
+        "has_destination": current.has_destination,
+        "destination": current.destination,
+    }, indent=2)
+
+    raw = extraction_chain.invoke({
+        "question": question,
+        "current_state": current_state,
+    })
+    print(f"[classify_query] Raw extraction: {raw}")
+
+    try:
+        cleaned = raw.strip()
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+        data = json.loads(cleaned)
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"[classify_query] JSON parse failed: {e} — returning current state unchanged")
+        return current
+
+    return QueryClassification(
+        has_hours=bool(data.get("has_hours", False)),
+        hours_value=data.get("hours_value"),
+        has_compensation_amount=bool(data.get("has_compensation_amount", False)),
+        compensation_value=data.get("compensation_value"),
+        asks_about_compensation_or_refund=bool(data.get("asks_about_compensation_or_refund", False)),
+        has_origin=bool(data.get("has_origin", False)),
+        origin=data.get("origin"),
+        has_destination=bool(data.get("has_destination", False)),
+        destination=data.get("destination"),
+    )
+
+def build_extraction_block(clf: QueryClassification) -> str:
+    """Build a human-readable summary of what the user DID state.
+    
+    This goes into the rewrite prompt so the rewriter sees the ground truth.
+    """
+    lines = []
+
+    if clf.has_hours:
+        lines.append(f"- Delay duration: {clf.hours_value} hours (USER STATED)")
+    else:
+        lines.append("- Delay duration: NOT mentioned by user")
+
+    if clf.has_compensation_amount:
+        lines.append(f"- Compensation amount: {clf.compensation_value} (USER STATED)")
+    else:
+        lines.append("- Compensation amount: NOT mentioned by user")
+
+    if clf.asks_about_compensation_or_refund:
+        lines.append("- Topic: User asks about compensation or refund (USER STATED)")
+    else:
+        lines.append("- Topic: User did NOT explicitly ask about compensation or refund")
+
+    if clf.has_origin:
+        lines.append(f"- Origin: {clf.origin} (USER STATED)")
+    else:
+        lines.append("- Origin: NOT mentioned by user")
+
+    if clf.has_destination:
+        lines.append(f"- Destination: {clf.destination} (USER STATED)")
+    else:
+        lines.append("- Destination: NOT mentioned by user")
+
+    return "\n".join(lines)
+
+
+def build_constraint_block(clf: QueryClassification) -> str:
+    """Build explicit prohibitions for things the user did NOT say.
+    
+    These are injected as hard constraints into the rewrite prompt.
+    """
+    constraints = []
+
+    if not clf.has_hours:
+        constraints.append("- The user did NOT specify a number of hours. Do NOT add any hour amount to the rewritten query.")
+    else:
+        constraints.append(f"- The user specified {clf.hours_value} hours. Include exactly this value, do not change it.")
+
+    if not clf.has_compensation_amount:
+        constraints.append("- The user did NOT mention a compensation amount. Do NOT add any euro amount to the rewritten query.")
+    else:
+        constraints.append(f"- The user mentioned {clf.compensation_value}. Include exactly this value, do not change it.")
+
+    if not clf.has_origin:
+        constraints.append("- The user did NOT specify an origin/departure location. Do NOT add one.")
+    else:
+        constraints.append(f"- The user specified origin: {clf.origin}. Include it.")
+
+    if not clf.has_destination:
+        constraints.append("- The user did NOT specify a destination. Do NOT add one.")
+    else:
+        constraints.append(f"- The user specified destination: {clf.destination}. Include it.")
+
+    return "\n".join(constraints)
+
+def rewrite_query(
+    question: str, clf: Optional[QueryClassification] = None
+) -> str:
+    """Rewrite the user question into a retrieval query.
+
+    Accepts a pre-built classification to avoid redundant LLM calls.
+    Falls back to classifying from scratch if none is provided.
+    """
+    if clf is None:
+        clf = classify_query(question)
+    print(f"[rewrite_query] Classification: {clf}")
+
+    extraction_block = build_extraction_block(clf)
+    constraint_block = build_constraint_block(clf)
+
+    rewritten = rewrite_chain.invoke({
+        "question": question,
+        "extraction_block": extraction_block,
+        "constraint_block": constraint_block,
+        "history": format_history(conversation_history),
+    })
+    print(f"[rewrite_query] Rewritten question: {rewritten}")
+    return rewritten
+
+
 def ask(question: str) -> str:
-    docs = retriever.invoke(question)
+    """Main entry point: classify, ask for missing info if needed, then answer.
+
+    Maintains a running QueryClassification across follow-up rounds.
+    The LLM receives the current state and returns a full updated JSON.
+    merge_classification runs as a safety net in case the LLM drops a field.
+    """
+    accumulated_question = question
+
+    # Initial extraction (no prior state)
+    clf = classify_query(question)
+    print(f"[ask] Initial classification: {clf}")
+
+    while True:
+        missing = get_missing_fields(clf)
+        if not missing:
+            break
+
+        followup_message = ask_followup(accumulated_question, missing)
+        print(f"\nAssistant: {followup_message}")
+
+        user_reply = input("U: ")
+        accumulated_question = f"{accumulated_question}\n{user_reply}"
+
+        # LLM sees current state + new reply, returns full updated JSON
+        llm_clf = classify_query(user_reply, current=clf)
+        # Safety net: merge ensures the LLM didn't accidentally wipe fields
+        clf = merge_classification(clf, llm_clf)
+        print(f"[ask] Updated classification: {clf}")
+
+    rewritten = rewrite_query(accumulated_question, clf=clf)
+    docs = retriever.invoke(rewritten)
     context = format_docs_with_sources(docs)
-    raw_answer = generation_chain.invoke({"context": context, "question": question})
-    return finalize_response_with_sources(raw_answer, docs)
+    raw_answer = generation_chain.invoke({
+        "context": context,
+        "question": accumulated_question,
+        "history": format_history(conversation_history),
+    })
+    final_answer = finalize_response_with_sources(raw_answer, docs)
+
+    conversation_history.append({
+        "question": question,
+        "answer": final_answer,
+    })
+
+    return final_answer
 
 def ask_and_print(question: str) -> None:
     print(f"\n--- Question: {question} ---")
@@ -371,20 +743,45 @@ def ask_and_print(question: str) -> None:
     print(f"Answer:\n{response}")
     print("-" * 50)
 
-ask_and_print("Ik vlieg vanuit Istanbul naar Amsterdam, maar mijn vlucht heeft 6 uur vertraging. Als EU-burger wil ik graag weten op welke compensatie ik recht heb voor mijn economie klasse vlucht?")
+# --- Interactive terminal loop ---
+# Runs until the user types "quit" or "exit".
+# Each input starts a fresh conversation (the multi-turn follow-up
+# loop for missing fields still happens inside ask()).
+if __name__ == "__main__":
+    print("\nKLM Passenger Rights Assistant")
+    print("Type 'quit' or 'exit' to stop.\n")
 
-ask_and_print("Mijn vlucht is geannuleerd, wat nu?")
+    while True:
+        user_input = input("U: ").strip()
 
-ask_and_print("Kan ik mijn stoelreservering upgraden naar business class?")
+        # Allow the user to exit gracefully
+        if user_input.lower() in ("quit", "exit", "q"):
+            print("Tot ziens!")
+            break
 
-ask_and_print("Ik heb recht op €400 compensatie voor mijn vertraagde vlucht van Amsterdam naar Brussel, toch?")
+        # Skip empty input
+        if not user_input:
+            continue
 
-ask_and_print("Ik heb een vlucht van Brussel naar Amsterdam, maar mijn vlucht heeft 3 uur vertraging. Heb ik recht op compensatie?")
+        response = ask(user_input)
+        print(f"\nAssistant: {response}\n")
 
-ask_and_print("Mijn vlucht heeft vertraging. Wat zijn mijn opties?")
+# ask_and_print("Ik vlieg vanuit Istanbul naar Amsterdam, maar mijn vlucht heeft 6 uur vertraging. Als EU-burger wil ik graag weten op welke compensatie ik recht heb voor mijn economie klasse vlucht?")
 
-ask_and_print("Vanaf welke vertragingstijd heb ik recht op compensatie?")
+# ask_and_print("Mijn vlucht is geannuleerd, wat nu?")
 
-ask_and_print("Waar heb ik allemaal recht op als mijn vlucht vertraagd is?")
+# ask_and_print("Kan ik mijn stoelreservering upgraden naar business class?")
+
+# ask_and_print("Ik heb recht op €400 compensatie voor mijn vertraagde vlucht van Amsterdam naar Brussel, toch?")
+
+# ask_and_print("Ik heb een vlucht van Brussel naar Amsterdam, maar mijn vlucht heeft 3 uur vertraging. Heb ik recht op compensatie?")
+
+# ask_and_print("Mijn vlucht heeft vertraging. Wat zijn mijn opties?")
+
+# ask_and_print("Vanaf welke vertragingstijd heb ik recht op compensatie?")
+
+# ask_and_print("Waar heb ik allemaal recht op als mijn vlucht vertraagd is?")
+
+# ask_and_print("Ik heb een vlucht van Brussel naar Amsterdam. Heb ik recht op compensatie?")
 
 # ask_and_print(input("Ask something about your compensation: "))
