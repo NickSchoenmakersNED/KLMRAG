@@ -54,6 +54,7 @@ def test_responses():
         
         raw_answer = generation_chain.invoke({
             "context": context, 
+            "history": "",  # Added missing history variable for tests
             "question": entry["question"]
         })
         final_answer = finalize_response_with_sources(raw_answer, docs)
