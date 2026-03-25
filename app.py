@@ -61,7 +61,17 @@ if prompt := st.chat_input("How can I help you?"):
                 if not clf.has_hours:
                     clf.has_hours = True
                     clf.hours_value = str(info["delay_hours"])
-                flight_info_note = f"\n\n[Systeem Notitie: De API heeft vluchtinformatie gevonden voor {clf.flight_number}: Vertrek: {info['origin']}, Aankomst: {info['destination']}, Vertraging: {info['delay_hours']} uur.]"
+                flight_info_note = (
+                    f"\n\n[Systeem Notitie: De API heeft de volgende vluchtinformatie gevonden voor {clf.flight_number}:\n"
+                    f"- Vertrek: {info['origin']}\n"
+                    f"- Aankomst: {info['destination']}\n"
+                    f"- Geplande vertrektijd: {info['scheduled_departure']}\n"
+                    f"- Werkelijke vertrektijd: {info['actual_departure']}\n"
+                    f"- Geplande aankomsttijd: {info['scheduled_arrival']}\n"
+                    f"- Werkelijke aankomsttijd: {info['actual_arrival']}\n"
+                    f"- Vertraging bij aankomst: {info['delay_hours']} uur\n"
+                    f"- Reden vertraging: {info['reason']}]"
+                )
 
             distance_info = ""
             if clf.has_origin and clf.has_destination:

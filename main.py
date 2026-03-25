@@ -27,6 +27,8 @@ class QueryClassification:
     Every field defaults to the 'absent' state so the rewriter knows
     exactly what was and was NOT stated by the user.
     """
+    has_flight_number: bool = False
+    flight_number: Optional[str] = None
     has_hours: bool = False
     hours_value: Optional[str] = None
     has_compensation_amount: bool = False
@@ -55,6 +57,8 @@ def merge_classification(
         QueryClassification: The merged classification state.
     """
     return QueryClassification(
+        has_flight_number=update.has_flight_number or base.has_flight_number,
+        flight_number=update.flight_number if update.has_flight_number else base.flight_number,
         has_hours=update.has_hours or base.has_hours,
         hours_value=update.hours_value if update.has_hours else base.hours_value,
         has_compensation_amount=update.has_compensation_amount or base.has_compensation_amount,
@@ -173,6 +177,8 @@ Current state:
 Return a JSON object with exactly these keys:
 
 {{
+  "has_flight_number": true/false,
+  "flight_number": "<flight number string, e.g. 'KL1234'>" or null,
   "has_hours": true/false,
   "hours_value": "<digit(s) as string>" or null,
   "has_compensation_amount": true/false,
@@ -189,7 +195,8 @@ Rules:
 2. has_compensation_amount is true ONLY if the user mentions a specific monetary amount (e.g. "€400", "400 euro", "250 euros").
 3. asks_about_compensation_or_refund is true if the user asks about compensation, vergoeding, compensatie, refund, terugbetaling, geld terug, or similar.
 4. For origin/destination: determine which location is the departure and which is the arrival based on context words like "van", "vanuit", "from", "naar", "to", "richting". If the direction is ambiguous, set both has_origin and has_destination to false and leave values null.
-5. Return ONLY the JSON object. No explanation, no markdown, no backticks.
+5. has_flight_number is true if the user mentions a specific flight number (e.g. "KL123", "KLM 456").
+6. Return ONLY the JSON object. No explanation, no markdown, no backticks.
 
 User question: {question}"""
 
@@ -678,6 +685,53 @@ def format_history(history: deque[dict]) -> str:
         lines.append(f"Assistent: {turn['answer']}")
     return "\n".join(lines)
 
+def fetch_flight_info(flight_number: str) -> dict:
+    """
+    Mock tool to fetch flight information for a given flight number.
+    Returns a dictionary with origin, destination, delays, and times.
+    
+    Parameters:
+        flight_number (str): The flight number to look up.
+        
+    Returns:
+        dict: A dictionary containing flight details.
+    """
+    import hashlib
+    import datetime
+    
+    cities = ["Amsterdam", "London", "Paris", "New York", "Istanbul", "Berlin", "Rome", "Madrid", "Barcelona", "Dubai", "Brussel", "Wenen"]
+    
+    h = int(hashlib.sha256(flight_number.encode('utf-8')).hexdigest(), 16)
+    
+    origin = cities[h % len(cities)]
+    destination = cities[(h // len(cities)) % len(cities)]
+    if origin == destination:
+        destination = cities[(h // (len(cities)**2)) % len(cities)]
+        
+    delay_hours = (h % 5) + 2 # 2 to 6 hours delay at arrival
+    
+    # Generate mock times
+    base_time = datetime.datetime(2025, 1, 1, 10, 0) + datetime.timedelta(hours=h % 12)
+    flight_duration = datetime.timedelta(hours=(h % 6) + 1)
+    
+    scheduled_departure = base_time
+    scheduled_arrival = scheduled_departure + flight_duration
+    
+    actual_departure = scheduled_departure + datetime.timedelta(hours=delay_hours - 0.5)
+    actual_arrival = scheduled_arrival + datetime.timedelta(hours=delay_hours)
+    
+    print(f"[Flight API] Fetched info for {flight_number}: {origin} -> {destination}, {delay_hours}h delay")
+    return {
+        "origin": origin,
+        "destination": destination,
+        "delay_hours": float(delay_hours),
+        "scheduled_departure": scheduled_departure.strftime("%Y-%m-%d %H:%M"),
+        "actual_departure": actual_departure.strftime("%Y-%m-%d %H:%M"),
+        "scheduled_arrival": scheduled_arrival.strftime("%Y-%m-%d %H:%M"),
+        "actual_arrival": actual_arrival.strftime("%Y-%m-%d %H:%M"),
+        "reason": "operationele redenen (geen buitengewone omstandigheden)"
+    }
+
 def get_missing_fields(clf: QueryClassification) -> list[str]:
     """
     Check which required fields are still absent in the classification.
@@ -690,10 +744,17 @@ def get_missing_fields(clf: QueryClassification) -> list[str]:
     Returns:
         list[str]: A list of plain-text descriptions for each missing field.
     """
+    if clf.has_flight_number:
+        return []
+
     missing = []
     for field_name in REQUIRED_FIELDS:
         if not getattr(clf, field_name):
             missing.append(FIELD_DESCRIPTIONS[field_name])
+            
+    if missing:
+        missing.append("of vul simpelweg uw vluchtnummer in (bijv. KL1234, KLM 456)")
+        
     return missing
 
 
@@ -737,6 +798,8 @@ def classify_query(
         current = QueryClassification()
 
     current_state = json.dumps({
+        "has_flight_number": current.has_flight_number,
+        "flight_number": current.flight_number,
         "has_hours": current.has_hours,
         "hours_value": current.hours_value,
         "has_compensation_amount": current.has_compensation_amount,
@@ -764,6 +827,8 @@ def classify_query(
         return current
 
     return QueryClassification(
+        has_flight_number=bool(data.get("has_flight_number", False)),
+        flight_number=data.get("flight_number"),
         has_hours=bool(data.get("has_hours", False)),
         hours_value=data.get("hours_value"),
         has_compensation_amount=bool(data.get("has_compensation_amount", False)),
@@ -787,6 +852,11 @@ def build_extraction_block(clf: QueryClassification) -> str:
         str: A multiline bullet-point representation of the established facts.
     """
     lines = []
+
+    if clf.has_flight_number:
+        lines.append(f"- Flight number: {clf.flight_number} (USER STATED)")
+    else:
+        lines.append("- Flight number: NOT mentioned by user")
 
     if clf.has_hours:
         lines.append(f"- Delay duration: {clf.hours_value} hours (USER STATED)")
@@ -918,13 +988,46 @@ def ask(question: str) -> str:
         # Safety net: merge ensures the LLM didn't accidentally wipe fields
         clf = merge_classification(clf, llm_clf)
         print(f"[ask] Updated classification: {clf}")
+        
+    flight_info_note = ""
+    if clf.has_flight_number and clf.flight_number:
+        info = fetch_flight_info(clf.flight_number)
+        if not clf.has_origin:
+            clf.has_origin = True
+            clf.origin = info["origin"]
+        if not clf.has_destination:
+            clf.has_destination = True
+            clf.destination = info["destination"]
+        if not clf.has_hours:
+            clf.has_hours = True
+            clf.hours_value = str(info["delay_hours"])
+        flight_info_note = (
+            f"\n\n[Systeem Notitie: De API heeft de volgende vluchtinformatie gevonden voor {clf.flight_number}:\n"
+            f"- Vertrek: {info['origin']}\n"
+            f"- Aankomst: {info['destination']}\n"
+            f"- Geplande vertrektijd: {info['scheduled_departure']}\n"
+            f"- Werkelijke vertrektijd: {info['actual_departure']}\n"
+            f"- Geplande aankomsttijd: {info['scheduled_arrival']}\n"
+            f"- Werkelijke aankomsttijd: {info['actual_arrival']}\n"
+            f"- Vertraging bij aankomst: {info['delay_hours']} uur\n"
+            f"- Reden vertraging: {info['reason']}]"
+        )
+
+    distance_info = ""
+    if clf.has_origin and clf.has_destination:
+        distance = calculate_distance(clf.origin, clf.destination)
+        if distance:
+            distance_info = f"\n\n[Systeem Notitie: De berekende vliegafstand van {clf.origin} naar {clf.destination} is ongeveer {distance:.0f} km. Gebruik deze afstand om te bepalen in welke categorie de vlucht valt volgens de regels.]"
 
     rewritten = rewrite_query(accumulated_question, clf=clf)
     docs = retriever.invoke(rewritten)
     context = format_docs_with_sources(docs)
+    
+    augmented_question = accumulated_question + flight_info_note + distance_info
+    
     raw_answer = generation_chain.invoke({
         "context": context,
-        "question": accumulated_question,
+        "question": augmented_question,
         "history": format_history(conversation_history),
     })
     final_answer = finalize_response_with_sources(raw_answer, docs)
