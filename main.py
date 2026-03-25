@@ -4,6 +4,9 @@ import json
 from typing import Optional
 from dataclasses import dataclass, field
 from pathlib import Path
+from geopy.geocoders import Nominatim
+from geopy.distance import geodesic
+import airportsdata
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -54,6 +57,92 @@ def merge_classification(
         has_destination=update.has_destination or base.has_destination,
         destination=update.destination if update.has_destination else base.destination,
     )
+
+geolocator = Nominatim(user_agent="klm_rag_assistant_1.0")
+
+# Load IATA database once
+try:
+    airports_db = airportsdata.load('IATA')
+except Exception as e:
+    airports_db = {}
+    print(f"Warning: Could not load airportsdata: {e}")
+
+def get_location_coords(location_str: str) -> Optional[tuple[float, float]]:
+    """
+    Get the latitude and longitude coordinates for a given location string.
+    Prioritizes airport matches (IATA codes, exact names, or fuzzy keywords) 
+    before falling back to general city geocoding using Nominatim.
+    
+    Parameters:
+        location_str (str): The name of the city, airport, or 3-letter IATA code.
+        
+    Returns:
+        Optional ([tuple[float, float]]): A tuple containing (latitude, longitude) if found, 
+                                       otherwise None.
+    """
+    if not location_str:
+        return None
+        
+    loc_upper = location_str.strip().upper()
+    loc_lower = location_str.strip().lower()
+
+    # 1. Exact IATA match (e.g. "AMS", "JFK")
+    if len(loc_upper) == 3 and loc_upper in airports_db:
+        return (airports_db[loc_upper]['lat'], airports_db[loc_upper]['lon'])
+
+    # 2. Strict exact name match in airports DB
+    for iata, data in airports_db.items():
+        if loc_lower == data.get('name', '').lower():
+            return (data['lat'], data['lon'])
+
+    # 3. Fuzzy search for airport keywords
+    airport_keywords = ['airport', 'luchthaven', 'schiphol', 'heathrow', 'jfk', 'cdg']
+    if any(kw in loc_lower for kw in airport_keywords):
+        for iata, data in airports_db.items():
+            name_lower = data.get('name', '').lower()
+            # If the user typed "Amsterdam Airport" -> match "Amsterdam Airport Schiphol"
+            if loc_lower in name_lower or (len(loc_lower) > 4 and name_lower in loc_lower):
+                return (data['lat'], data['lon'])
+
+    # 4. Fallback to Nominatim geocoding
+    try:
+        loc = geolocator.geocode(location_str)
+        # If no result, try appending 'airport'
+        if not loc and 'airport' not in loc_lower and 'luchthaven' not in loc_lower:
+            loc = geolocator.geocode(f"{location_str} airport")
+        
+        if loc:
+            return (loc.latitude, loc.longitude)
+    except Exception as e:
+        print(f"Distance calculation geocoder failed: {e}")
+        
+    return None
+
+def calculate_distance(origin: str, destination: str) -> Optional[float]:
+    """
+    Calculate the geodesic distance between an origin and destination location in kilometers.
+    Uses get_location_coords to find the coordinates for both locations.
+    
+    Parameters:
+        origin (str): The starting location (city, airport, or IATA code).
+        destination (str): The ending location (city, airport, or IATA code).
+        
+    Returns:
+        Optional (float): The geodesic distance in kilometers if both locations 
+                         are successfully geocoded, otherwise None.
+    """
+    try:
+        coords1 = get_location_coords(origin)
+        coords2 = get_location_coords(destination)
+        if coords1 and coords2:
+            dist = geodesic(coords1, coords2).kilometers
+            print(f"[Distance Calculation] {origin} {coords1} -> {destination} {coords2} | Distance: {dist:.2f} km")
+            return dist
+        print(f"[Distance Calculation] Could not find coordinates for origin ('{origin}') or destination ('{destination}')")
+        return None
+    except Exception as e:
+        print(f"Distance calculation failed: {e}")
+        return None
 
 EXTRACTION_PROMPT = """You are a fact-extraction module. You receive a customer question about air travel / passenger rights.
 

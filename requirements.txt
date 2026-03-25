@@ -5,3 +5,5 @@ langchain_core==1.2.16
 langchain-openai==1.1.10
 faiss-cpu==1.13.2
 pypdf==6.7.5
+geopy==2.4.1
+airportsdata==20260315
