@@ -7,3 +7,4 @@ faiss-cpu==1.13.2
 pypdf==6.7.5
 geopy==2.4.1
 airportsdata==20260315
+streamlit==1.55.0
